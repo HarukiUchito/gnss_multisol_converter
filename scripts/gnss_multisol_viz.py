@@ -1,14 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import rospy
-import pyproj
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from trajectory_viz_python.srv import AddNewPoint
-import message_filters
+from latlon_to_xy_service.srv import ConvLatLon
 from rtklibros.msg import *
-
-EPSG4612 = pyproj.Proj("+init=EPSG:4612")
-EPSG2451 = pyproj.Proj("+init=EPSG:2451")
+import message_filters
 
 def add_marker(name, x, y):
     rospy.wait_for_service('trajectory_server')
@@ -19,30 +16,46 @@ def add_marker(name, x, y):
     except rospy.ServiceException, e:
         print "Service call failed: %s"%e
 
-ini_y,ini_x = 0.0, 0.0
-sub_msg = solutions()
+def conv_latlon(lat, lon):
+    rospy.wait_for_service('latlon_to_xy_service')
+    try:
+        convLatLon = rospy.ServiceProxy('latlon_to_xy_service', ConvLatLon)
+        resp1 = convLatLon(lat, lon)
+        return resp1
+    except rospy.ServiceException, e:
+        print "Service call failed: %s"%e
+
+ini_lat = rospy.get_param("/gnss_ini_lat")
+ini_lon = rospy.get_param("/gnss_ini_lon")
+iniXY = conv_latlon(ini_lat, ini_lon)
+
+calcedOnce = False
+sub_all = PoseWithCovarianceStamped()
+sub_msg = rtklibros.msg.solutions()
 
 ms_msg = message_filters.Subscriber('multi_solutions', solutions)
-ms_ini_xy = message_filters.Subscriber('gnss_ini_xy', PoseWithCovarianceStamped)
+ms_all = message_filters.Subscriber('latlon', PoseWithCovarianceStamped)
 
-def callback(msg, msg_ini_xy):
-    print msg
-    print msg_ini_xy
-    ini_x = msg_ini_xy.pose.pose.position.x
-    ini_y = msg_ini_xy.pose.pose.position.y
-        
-    for sol in msg.solutions:
-        y,x = pyproj.transform(EPSG4612, EPSG2451, sol.longitude,sol.latitude)
-        add_marker(sol.excludedSatellite, y - ini_y, x - ini_x)   
-    
+def callback(msg, msg_all):
+    global sub_msg, sub_all, calcedOnce
+    sub_msg = msg
+    sub_all = msg_all
+    calcedOnce = True
 
 def main():
+    global sub_msg, sub_all, iniX, iniY, calcedOnce
     rospy.init_node('gnss_multisol_viz', anonymous=True)
-    ts = message_filters.ApproximateTimeSynchronizer([ms_msg, ms_ini_xy], 1, 1)
+    ts = message_filters.ApproximateTimeSynchronizer([ms_msg, ms_all], 1, 1)
     ts.registerCallback(callback)
-
+    
     r = rospy.Rate(1)
     while not rospy.is_shutdown():
+        if calcedOnce:
+            solAll = conv_latlon(sub_all.pose.pose.position.x, sub_all.pose.pose.position.y)
+            add_marker("ALL", solAll.y - iniXY.y, solAll.x - iniXY.x)
+        for sol in sub_msg.solutions:
+            solXY = conv_latlon(sol.latitude, sol.longitude)
+            add_marker(sol.excludedSatellite, solXY.y - iniXY.y, solXY.x - iniXY.x)
         r.sleep()
 
 if __name__ == '__main__':
